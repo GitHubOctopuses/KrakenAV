@@ -1,0 +1,34 @@
+# ---- Runtime data (created at first run; do not commit) ----
+database/*.cvd
+database/*.cld
+database/*.sign
+database/freshclam.dat
+quarantine/*
+!quarantine/README.txt
+reports/*
+!reports/README.txt
+database/*
+!database/README.txt
+conf/settings.ini
+conf/freshclam.conf
+db_backup.7z
+eicar_selftest/
+
+# ---- ClamAV official binary package (fetched separately, see README) ----
+clamav-1.5.4.win.x64/
+
+# ---- Build artifacts ----
+*.exe
+*.dll
+*.obj
+*.res
+*.pdb
+.vs/
+x64/
+Debug/
+Release/
+
+# ---- System / editor ----
+Thumbs.db
+desktop.ini
+~$*
