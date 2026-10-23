@@ -17,6 +17,9 @@ eicar_selftest/
 # ---- ClamAV official binary package (fetched separately, see README) ----
 clamav-1.5.4.win.x64/
 
+# ---- Release archives (GitHub Release assets instead) ----
+*.zip
+
 # ---- Build artifacts ----
 *.exe
 *.dll
