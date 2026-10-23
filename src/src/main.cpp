@@ -186,7 +186,7 @@ static int HitTest(int px, int py) {
         for (int r = 0; r < 2; r++) for (int c = 0; c < 2; c++)
             if (InRf(ToolCardRect(r, c), px, py)) return H_T_SET + r * 2 + c;
     } else if (g_page == 2) {
-        RectF url = Rf(SIDE_W + (WIN_W - SIDE_W) / 2 - 150, 300, 300, 30);
+        RectF url = Rf(SIDE_W + (WIN_W - SIDE_W) / 2 - 250, 300, 500, 30);
         if (InRf(url, px, py)) return H_ABOUT_URL;
     }
     return H_NONE;
@@ -343,7 +343,7 @@ static void PaintMain(HWND h) {
              F_ABOUT, COL_TEXT_DIM, StringAlignmentCenter);
         Text(&g, STR(STR_ABOUT_ENGINE), RectF((REAL)cx0, (REAL)SX(266), (REAL)(W - cx0), (REAL)SX(26)),
              F_ABOUT, COL_TEXT_DIM, StringAlignmentCenter);
-        Text(&g, STR(STR_ABOUT_URL), Rf(SIDE_W + (WIN_W - SIDE_W) / 2 - 150, 300, 300, 30),
+        Text(&g, STR(STR_ABOUT_URL), Rf(SIDE_W + (WIN_W - SIDE_W) / 2 - 250, 300, 500, 30),
              F_ABOUT, COL_ACCENT_LT, StringAlignmentCenter, true);
         Text(&g, STR(STR_ABOUT_GPL), RectF((REAL)cx0, (REAL)SX(470), (REAL)(W - cx0), (REAL)SX(26)),
              F_SUB, Color(0xFF, 0x6B, 0x7A, 0x8C), StringAlignmentCenter);
@@ -524,7 +524,7 @@ static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         case H_T_UPD: ShowUpdateWindow(h); return 0;
         case H_T_QUAR: OpenQuarantine(); return 0;
         case H_ABOUT_URL:
-            SafeShellOpen(h, L"https://www.clamav.net");
+            SafeShellOpen(h, L"https://github.com/GitHubOctopuses/KrakenAV");
             return 0;
         case H_UPDATE_LINK:
             ShowUpdateWindow(h);
