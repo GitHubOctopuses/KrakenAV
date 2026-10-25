@@ -25,25 +25,38 @@ void DrainLogToEdit(HWND edit) {
         take.swap(g_logPending);
     }
     if (take.empty()) return;
+    // 先记录视图状态：用户上翻查看时不被新日志强拉到底
+    SCROLLINFO si{ sizeof(si), SIF_POS | SIF_RANGE | SIF_PAGE };
+    GetScrollInfo(edit, SB_VERT, &si);
+    bool atBottom = si.nPos >= (int)(si.nMax - si.nPage - 2);
+    LONGLONG firstVisible = SendMessageW(edit, EM_GETFIRSTVISIBLELINE, 0, 0);
+
     SendMessageW(edit, WM_SETREDRAW, FALSE, 0);
     for (auto& l : take) {
         SendMessageW(edit, EM_SETSEL, (WPARAM)-1, (LPARAM)-1);
         std::wstring nl = l + L"\r\n";
         SendMessageW(edit, EM_REPLACESEL, FALSE, (LPARAM)nl.c_str());
     }
-    // 裁剪：最多保留 1500 行
+    // 裁剪：最多保留 1500 行（记录从顶部移除的行数用于滚动补偿）
+    LONGLONG removed = 0;
     LONGLONG lines = SendMessageW(edit, EM_GETLINECOUNT, 0, 0);
     if (lines > 1500) {
-        LONGLONG idx = SendMessageW(edit, EM_LINEINDEX, (WPARAM)(lines - 1000), 0);
+        LONGLONG keep = lines - 1000;
+        LONGLONG idx = SendMessageW(edit, EM_LINEINDEX, (WPARAM)keep, 0);
         if (idx > 0) {
+            removed = keep;
             SendMessageW(edit, EM_SETSEL, 0, idx);
             SendMessageW(edit, EM_REPLACESEL, FALSE, (LPARAM)L"");
         }
     }
-    SCROLLINFO si{ sizeof(si), SIF_POS | SIF_RANGE | SIF_PAGE };
-    GetScrollInfo(edit, SB_VERT, &si);
-    bool atBottom = si.nPos >= (int)(si.nMax - si.nPage - 2);
-    if (atBottom) SendMessageW(edit, EM_SCROLL, SB_BOTTOM, 0);
+    if (atBottom) {
+        SendMessageW(edit, EM_SCROLL, SB_BOTTOM, 0);
+    } else {
+        // 恢复原视图位置（内容因追加/裁剪平移了 removed 行）
+        LONGLONG nowFirst = SendMessageW(edit, EM_GETFIRSTVISIBLELINE, 0, 0);
+        LONGLONG delta = (firstVisible + removed) - nowFirst;
+        if (delta != 0) SendMessageW(edit, EM_LINESCROLL, 0, (LPARAM)delta);
+    }
     SendMessageW(edit, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(edit, nullptr, FALSE);
 }
@@ -71,18 +84,10 @@ bool EngineInitLibrary() {
 // ClamAV 1.5.4 的 cl_scanfile/cl_load 用 UTF-8→ANSI 转换打开文件，
 // 中文路径会静默失败（文件打不开→当作干净），因此：
 //  - 扫描：CreateFileW 拿句柄 → fmap + 自写 pread 回调（Unicode 安全）
-//  - 毒库：目录含中文时优先走 ASCII 入口联接（C:\KravenAV），兜底 ProgramData
+//  - 毒库：目录含中文时重定向到 ProgramData 下的纯 ASCII 目录
+//    （正常情况下程序已通过盘符映射以 ASCII 路径运行，此处仅兜底）
 std::wstring EffectiveDbDir() {
     if (!PathHasNonAscii(g_dbDir)) return g_dbDir;
-    // 优先：系统盘的 KrakenAV 联接目录（部署时创建，指向产品目录，在杀软白名单内）
-    wchar_t sd[8]{};
-    GetEnvironmentVariableW(L"SystemDrive", sd, 8);
-    if (sd[0]) {
-        std::wstring jdb = std::wstring(sd) + L"\\KrakenAV\\database";
-        DWORD at = GetFileAttributesW(jdb.c_str());
-        if (at != INVALID_FILE_ATTRIBUTES && (at & FILE_ATTRIBUTE_DIRECTORY)) return jdb;
-    }
-    // 兜底：ProgramData（不在杀软白名单时更新可能被拦，日志会提示）
     wchar_t pd[MAX_PATH];
     if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr, 0, pd))) {
         std::wstring d = std::wstring(pd) + L"\\KrakenAV\\db";
@@ -106,19 +111,20 @@ static off_t PreadCB(void* handle, void* buf, size_t count, off_t offset) {
 cl_error_t ScanFileUnicode(const std::wstring& path, const char** virname,
                            unsigned long* scanned, struct cl_engine* eng,
                            struct cl_scan_options* so) {
-    HANDLE h = CreateFileW(path.c_str(), FILE_READ_DATA,
+    HANDLE h = CreateFileW(ToLongPath(path).c_str(), FILE_READ_DATA,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return CL_EOPEN;
     LARGE_INTEGER sz{};
     if (!GetFileSizeEx(h, &sz)) { CloseHandle(h); return CL_ESTAT; }
-    // 文件名提示（扩展名供类型识别）：优先 8.3 短路径
+    // 类型识别提示：只用扩展名（ASCII 校验）。
+    // 不依赖完整路径/8.3 短路径——后者在禁用 8.3 的卷上不可用，会导致
+    // 中文路径下 HTML/JS/VBS 等无 magic 的类型识别退化。
     std::string hint = "file";
-    wchar_t shortp[1024];
-    DWORD n = GetShortPathNameW(path.c_str(), shortp, 1024);
-    if (n > 0 && n < 1024) {
-        std::wstring sp(shortp, n);
-        if (!PathHasNonAscii(sp)) hint = WToUtf8(sp);
+    size_t dot = path.find_last_of(L".\\/");
+    if (dot != std::wstring::npos && path[dot] == L'.') {
+        std::wstring ext = ToLowerW(path.substr(dot));
+        if (ext.size() <= 10 && !PathHasNonAscii(ext)) hint = "scan" + WToUtf8(ext);
     }
     cl_fmap_t* map = cl_fmap_open_handle((void*)h, 0, (size_t)sz.QuadPart, PreadCB, 0);
     if (!map) { CloseHandle(h); return CL_EMEM; }
@@ -282,20 +288,43 @@ std::vector<std::wstring> QuickScanRoots() {
 }
 
 // ---------------- 威胁处理 ----------------
+// 隔离区留档（含 XOR 混淆），写 manifest；返回生成的隔离文件路径，失败返回空
+static std::wstring QuarantineCopy(const std::wstring& path, const std::wstring& tag,
+                                   const std::wstring& vn) {
+    EnsureDir(g_quarDir);
+    std::wstring base = path.substr(path.find_last_of(L"\\/") + 1);
+    wchar_t rnd[16]; swprintf(rnd, 16, L"%04X", (unsigned)(GetTickCount() & 0xFFFF));
+    std::wstring dst = g_quarDir + L"\\" + GetTimeStamp() + L"_" + tag + L"_" + rnd +
+                       L"_" + base + L".quarantine";
+    if (!CopyFileW(path.c_str(), dst.c_str(), TRUE)) return L"";
+    XorFileInPlace(dst);   // 混淆：即使改回原名也无法直接运行（恢复用 quarantine_restore.exe）
+    std::ofstream mf(std::filesystem::path(g_quarDir + L"\\manifest.txt"),
+                     std::ios::app | std::ios::binary);
+    if (mf.tellp() == 0) {
+        std::string head = WToUtf8(std::wstring(STR(STR_QUAR_MANIFEST_HEAD)) + L"\r\n");
+        mf.write(head.data(), head.size());
+    }
+    std::string line = WToUtf8(L"[" + NowStr() + L"] " + path + L" -> " + dst + L" ; " + vn + L"\r\n");
+    mf.write(line.data(), line.size());
+    return dst;
+}
+
 std::wstring ApplyThreat(const std::wstring& path, const char* virname) {
     std::wstring vn = virname ? Utf8ToW(virname) : L"Unknown";
     if (g_set.infectedAction == 1) {
+        // 删除前先在隔离区留一份副本（防误报毁档；副本同样 XOR 混淆）
+        QuarantineCopy(path, L"del", vn);
         if (DeleteFileW(path.c_str())) return STR(STR_ACT_DELETED);
         return STR(STR_ACT_DELETED_FAIL);
     }
     if (g_set.infectedAction == 2) {
+        // 优先移动（同卷零拷贝）；跨卷失败则复制+混淆+删源
         EnsureDir(g_quarDir);
-        // 隔离文件名：时间戳_随机_原名.quarantine
         std::wstring base = path.substr(path.find_last_of(L"\\/") + 1);
         wchar_t rnd[16]; swprintf(rnd, 16, L"%04X", (unsigned)(GetTickCount() & 0xFFFF));
-        std::wstring dst = g_quarDir + L"\\" + GetTimeStamp() + L"_" + rnd + L"_" + base + L".quarantine";
-        if (MoveFileExW(path.c_str(), dst.c_str(), MOVEFILE_REPLACE_EXISTING) ||
-            (CopyFileW(path.c_str(), dst.c_str(), FALSE) && DeleteFileW(path.c_str()))) {
+        std::wstring dst = g_quarDir + L"\\" + GetTimeStamp() + L"_q_" + rnd + L"_" + base + L".quarantine";
+        if (MoveFileExW(path.c_str(), dst.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+            XorFileInPlace(dst);
             std::ofstream mf(std::filesystem::path(g_quarDir + L"\\manifest.txt"),
                              std::ios::app | std::ios::binary);
             if (mf.tellp() == 0) {
@@ -306,6 +335,9 @@ std::wstring ApplyThreat(const std::wstring& path, const char* virname) {
             mf.write(line.data(), line.size());
             return STR(STR_ACT_QUAR_OK);
         }
+        // 跨卷/移动失败：复制留档后删除
+        if (!QuarantineCopy(path, L"q", vn).empty() && DeleteFileW(path.c_str()))
+            return STR(STR_ACT_QUAR_OK);
         return STR(STR_ACT_QUAR_FAIL);
     }
     return STR(STR_ACT_REPORTED);
@@ -358,6 +390,25 @@ std::wstring LatestReportPath() {
 }
 
 // ---------------- 扫描线程 ----------------
+static bool LocalQueryDosTarget(const std::wstring& drive, std::wstring* out) {
+    wchar_t buf[1024];
+    DWORD n = QueryDosDeviceW(drive.c_str(), buf, 1024);
+    if (!n) return false;
+    if (out) *out = buf;
+    return true;
+}
+
+// 把可能是映射盘符的路径解析为真实路径（K:\x → D:\...\x；真实盘符原样）
+static std::wstring ResolveToRealPath(const std::wstring& dir) {
+    if (dir.size() < 2 || dir[1] != L':') return dir;
+    std::wstring tgt;
+    if (!LocalQueryDosTarget(dir.substr(0, 2), &tgt)) return dir;
+    if (tgt.rfind(L"\\??\\", 0) != 0) return dir;   // 真实卷
+    std::wstring real = tgt.substr(4);
+    while (!real.empty() && real.back() == L'\\') real.pop_back();
+    return real + dir.substr(2);
+}
+
 static void ScanWorker(ScanMode mode, std::wstring customRoot, HWND mainWnd) {
     g_scan.files = 0; g_scan.threats = 0; g_scan.errors = 0;
     g_scan.t0 = std::chrono::steady_clock::now();
@@ -374,6 +425,10 @@ static void ScanWorker(ScanMode mode, std::wstring customRoot, HWND mainWnd) {
         for (int i = 0; i < 26; i++) {
             if (!(drives & (1 << i))) continue;
             root[0] = (wchar_t)(L'A' + i);
+            // 跳过 DOS 设备映射盘符（subst/本程序的盘符映射）：
+            // 它们不是真实卷，内容经真实卷可达，扫了就是重复劳动
+            std::wstring tgt;
+            if (LocalQueryDosTarget(root, &tgt) && tgt.rfind(L"\\??\\", 0) == 0) continue;
             if (GetDriveTypeW(root) == DRIVE_FIXED) roots.push_back(root);
         }
         PushLog(L"—— " + std::wstring(STR(STR_LOG_START_FULL)) + L" ——");
@@ -397,12 +452,27 @@ static void ScanWorker(ScanMode mode, std::wstring customRoot, HWND mainWnd) {
     g_scan.phase = 2;
     std::vector<std::wstring> threatLines;
 
-    // 避免扫描自身病毒库/隔离区目录
-    auto isSkipDir = [](const std::wstring& p) -> bool {
-        std::wstring lp = ToLowerW(p);
-        std::wstring db = ToLowerW(EffectiveDbDir()), qd = ToLowerW(g_quarDir), rp = ToLowerW(g_reportDir);
+    // 跳过自身相关目录（毒库/隔离区/报告/程序目录）。
+    // 每个目录登记"逻辑路径+真实路径"两种形式（从映射盘符运行时两者不同）
+    std::vector<std::wstring> skipDirs;
+    {
         auto norm = [](std::wstring s) { if (!s.empty() && s.back() == L'\\') s.pop_back(); return s; };
-        return lp == norm(db) || lp == norm(qd) || lp == norm(rp);
+        for (const std::wstring* d : { &g_exeDir, &g_quarDir, &g_reportDir }) {
+            if (d->empty()) continue;
+            skipDirs.push_back(ToLowerW(norm(*d)));
+            skipDirs.push_back(ToLowerW(norm(ResolveToRealPath(*d))));
+        }
+        std::wstring edb = EffectiveDbDir();
+        if (!edb.empty()) {
+            skipDirs.push_back(ToLowerW(norm(edb)));
+            skipDirs.push_back(ToLowerW(norm(ResolveToRealPath(edb))));
+        }
+    }
+    auto isSkipDir = [&skipDirs](const std::wstring& p) -> bool {
+        std::wstring lp = ToLowerW(StripLongPath(p));
+        if (!lp.empty() && lp.back() == L'\\') lp.pop_back();
+        for (auto& s : skipDirs) if (lp == s) return true;
+        return false;
     };
 
     unsigned long long maxFileBytes = g_set.skipBigFiles ? ((unsigned long long)g_set.maxFileMB << 20) : 0;
@@ -420,40 +490,38 @@ static void ScanWorker(ScanMode mode, std::wstring customRoot, HWND mainWnd) {
             if (g_scan.cancel) break;
             std::wstring dir = stack.back(); stack.pop_back();
             std::error_code ec;
-            fs::path dirp(dir);
+            fs::path dirp(ToLongPath(dir));
             for (fs::directory_iterator it(dirp, fs::directory_options::skip_permission_denied, ec), end;
                  it != end; it.increment(ec)) {
                 if (g_scan.cancel) break;
                 if (ec) break;
                 const fs::path& p = it->path();
-                DWORD at = GetFileAttributesW(p.c_str());
+                DWORD at = GetFileAttributesW(ToLongPath(p.wstring()).c_str());
                 if (at == INVALID_FILE_ATTRIBUTES) continue;
                 if (at & FILE_ATTRIBUTE_DIRECTORY) {
                     if (at & FILE_ATTRIBUTE_REPARSE_POINT) continue; // 跳过联接/符号链接防循环
                     if (isSkipDir(p.wstring())) continue;
-                    stack.push_back(p.wstring());
+                    stack.push_back(StripLongPath(p.wstring()));
                 } else {
                     if (ExtInList(p.wstring(), g_set.excludeExt)) continue;
                     if (maxFileBytes) {
-                        LARGE_INTEGER sz{}; HANDLE hf = CreateFileW(p.c_str(), GENERIC_READ,
-                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                                        OPEN_EXISTING, 0, nullptr);
-                        if (hf == INVALID_HANDLE_VALUE) { g_scan.errors++; continue; }
-                        GetFileSizeEx(hf, &sz); CloseHandle(hf);
-                        if ((unsigned long long)sz.QuadPart > maxFileBytes) continue;
+                        std::error_code ec2;
+                        uintmax_t sz = it->file_size(ec2);   // 无需开句柄（内部 GetFileAttributesEx）
+                        if (ec2) { g_scan.errors++; continue; }
+                        if (sz > (uintmax_t)maxFileBytes) continue;
                     }
                     const char* virname = nullptr;
                     unsigned long scanned = 0;
-                    int rc = ScanFileUnicode(p.wstring(), &virname, &scanned, g_engine, &so);
+                    int rc = ScanFileUnicode(StripLongPath(p.wstring()), &virname, &scanned, g_engine, &so);
                     g_scan.files++;
                     if (rc == CL_VIRUS) {
                         g_scan.threats++;
-                        std::wstring act = ApplyThreat(p.wstring(), virname);
+                        std::wstring act = ApplyThreat(StripLongPath(p.wstring()), virname);
                         std::wstring line = L"[!!] " + std::wstring(STR(STR_LOG_FOUND)) + L": " +
-                                            (virname ? Utf8ToW(virname) : L"?") + L"  " + p.wstring() + L"  " + act;
+                                            (virname ? Utf8ToW(virname) : L"?") + L"  " + StripLongPath(p.wstring()) + L"  " + act;
                         PushLog(line);
                         threatLines.push_back(L"  " + (virname ? Utf8ToW(virname) : L"?") + L" | " +
-                                              p.wstring() + L" " + act);
+                                              StripLongPath(p.wstring()) + L" " + act);
                     } else if (rc != CL_CLEAN && rc != CL_SUCCESS && rc != CL_EMAXREC && rc != CL_EMAXSIZE &&
                                rc != CL_EMAXFILES && rc != CL_EFORMAT && rc != CL_EOPEN && rc != CL_EACCES) {
                         g_scan.errors++;

@@ -15,11 +15,12 @@ using namespace Gdiplus;
 // ClamAV 官方引擎按"程序所在目录"加载证书/数据库，不支持非 ASCII 路径。
 // 方案：检测到程序目录含非 ASCII 字符时，用 DefineDosDevice 把一个空闲盘符
 // 映射到程序目录（用户态 API、无需管理员），并经盘符路径透明重启自身。
-// 新实例的模块路径为纯 ASCII（如 K:\KrakenAV.exe），引擎一切正常。
 //
-// 防累积设计：
-//   - 重启前先清理指向本目录的历史残留映射
-//   - 新实例（盘符路径）退出时自动删除自己使用的盘符映射
+// 单实例 + 防累积设计：
+//   - 临时父实例（中文路径）：复用已有映射或新建，只负责拉起子实例，不做清理
+//   - 子实例（ASCII 盘符路径）：先抢单实例互斥体；抢到才清理历史残留映射
+//     （跳过自己正在用的盘符）；退出时删除自己的映射并释放互斥体
+//   - 第二个子实例抢不到互斥体 → 激活已有窗口后退出，不产生新映射
 static void RemoveOwnDosDevice();
 static bool QueryDosTarget(const std::wstring& drive, std::wstring* out) {
     wchar_t buf[1024];
@@ -31,7 +32,6 @@ static bool QueryDosTarget(const std::wstring& drive, std::wstring* out) {
 
 static bool IsOurMapping(const std::wstring& target, const std::wstring& dir) {
     // 映射目标形如 \??\<dir>；真实分区是 \Device\HarddiskVolume...
-    // dir 可能带尾反斜杠（"K:\"），目标不带——归一化后比较
     if (target.rfind(L"\\??\\", 0) != 0) return false;
     std::wstring d = dir;
     while (!d.empty() && d.back() == L'\\') d.pop_back();
@@ -39,11 +39,12 @@ static bool IsOurMapping(const std::wstring& target, const std::wstring& dir) {
     return target.compare(4, d.size(), d) == 0;
 }
 
-static void CleanupStaleMappings(const std::wstring& dir) {
+static void CleanupStaleMappings(const std::wstring& dir, const std::wstring& skipDrive) {
     DWORD mask = GetLogicalDrives();
-    for (int i = 25; i >= 0; i--) {          // 从 Z 往回清
+    for (int i = 25; i >= 0; i--) {
         if (!(mask & (1u << i))) continue;
         std::wstring d = std::wstring(1, wchar_t(L'A' + i)) + L":";
+        if (d == skipDrive) continue;        // 自己正在用的映射不动
         std::wstring tgt;
         if (!QueryDosTarget(d, &tgt)) continue;
         if (IsOurMapping(tgt, dir)) {
@@ -72,6 +73,27 @@ static void RemoveOwnDosDevice() {
     }
 }
 
+// 取得指向 dir 的映射盘符：优先复用已有映射（上次异常退出的残留），
+// 否则占用 K:-Z: 中第一个空闲盘符新建。失败返回空串。
+static std::wstring AcquireMappingDrive(const std::wstring& dir) {
+    DWORD mask = GetLogicalDrives();
+    // 复用
+    for (wchar_t c = L'K'; c <= L'Z'; c++) {
+        if (!(mask & (1u << (c - L'A')))) continue;
+        std::wstring d = std::wstring(1, c) + L":";
+        std::wstring tgt;
+        if (QueryDosTarget(d, &tgt) && IsOurMapping(tgt, dir)) return d;
+    }
+    // 新建
+    for (wchar_t c = L'K'; c <= L'Z'; c++) {
+        if (mask & (1u << (c - L'A'))) continue;
+        std::wstring d = std::wstring(1, c) + L":";
+        if (!DefineDosDeviceW(0, d.c_str(), (L"\\??\\" + dir).c_str())) continue;
+        return d;
+    }
+    return L"";
+}
+
 static bool RelaunchViaDosDevice() {
     wchar_t exep[MAX_PATH];
     GetModuleFileNameW(nullptr, exep, MAX_PATH);
@@ -82,31 +104,23 @@ static bool RelaunchViaDosDevice() {
     std::wstring dir(exep, (size_t)(sl - exep));          // 程序目录（可含中文）
     std::wstring fname = exePath.substr(exePath.find_last_of(L'\\') + 1);
 
-    // 清掉历史残留映射，避免多次启动累积盘符
-    CleanupStaleMappings(dir);
-
-    for (wchar_t drvCh = L'K'; drvCh <= L'Z'; drvCh++) {
-        std::wstring drv = std::wstring(1, drvCh) + L":";
-        if (GetLogicalDrives() & (1u << (drvCh - L'A'))) continue;  // 盘符已占用
-        std::wstring dev = L"\\??\\" + dir;
-        if (!DefineDosDeviceW(0, drv.c_str(), dev.c_str())) continue;
-        std::wstring newExe = drv + L"\\" + fname;
-        if (GetFileAttributesW(newExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
-            DefineDosDeviceW(DDD_REMOVE_DEFINITION, drv.c_str(), nullptr);
-            continue;
-        }
-        std::wstring cmd = L"\"" + newExe + L"\"";
-        std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
-        cmdBuf.push_back(0);
-        STARTUPINFOW si{ sizeof(si) };
-        PROCESS_INFORMATION pi{};
-        if (CreateProcessW(newExe.c_str(), cmdBuf.data(), nullptr, nullptr, FALSE,
-                           0, nullptr, drv.c_str(), &si, &pi)) {
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-            return true;
-        }
-        DefineDosDeviceW(DDD_REMOVE_DEFINITION, drv.c_str(), nullptr);
+    std::wstring drv = AcquireMappingDrive(dir);
+    if (drv.empty()) return false;
+    std::wstring newExe = drv + L"\\" + fname;
+    if (GetFileAttributesW(newExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        // 新建的映射无效则撤销（复用的不撤——可能另有实例在用）
+        return false;
+    }
+    std::wstring cmd = L"\"" + newExe + L"\"";
+    std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
+    cmdBuf.push_back(0);
+    STARTUPINFOW si{ sizeof(si) };
+    PROCESS_INFORMATION pi{};
+    if (CreateProcessW(newExe.c_str(), cmdBuf.data(), nullptr, nullptr, FALSE,
+                       0, nullptr, drv.c_str(), &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        return true;
     }
     return false;
 }
@@ -190,6 +204,22 @@ static int HitTest(int px, int py) {
         if (InRf(url, px, py)) return H_ABOUT_URL;
     }
     return H_NONE;
+}
+
+// 命中区域 → 客户区 RECT（悬停局部重绘用；无矩形返回 false）
+static bool RectForId(int id, RECT* rc) {
+    RectF r;
+    if (id == H_TITLE_CLOSE || id == H_TITLE_MIN || id == H_TITLE_GEAR) r = TitleBtnRect(id);
+    else if (id >= H_NAV0 && id <= H_NAV0 + 2)          r = NavRect(id - H_NAV0);
+    else if (id >= H_QUICK && id <= H_QUICK + 2)        r = ScanCardRect(id - H_QUICK);
+    else if (id == H_STOP)                              r = StopRect();
+    else if (id >= H_T_SET && id <= H_T_SET + 3)        r = ToolCardRect((id - H_T_SET) / 2, (id - H_T_SET) % 2);
+    else if (id == H_ABOUT_URL)                         r = Rf(SIDE_W + (WIN_W - SIDE_W) / 2 - 250, 300, 500, 30);
+    else if (id == H_UPDATE_LINK)                       r = UpdateLinkRect();
+    else return false;
+    rc->left = (LONG)r.X; rc->top = (LONG)r.Y;
+    rc->right = (LONG)r.GetRight() + 1; rc->bottom = (LONG)r.GetBottom() + 1;
+    return true;
 }
 
 // ---------------- 绘制 ----------------
@@ -476,8 +506,12 @@ static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         int px = GET_X_LPARAM(l), py = GET_Y_LPARAM(l);
         int id = HitTest(px, py);
         if (id != g_hover) {
+            int old = g_hover;
             g_hover = id;
-            InvalidateRect(h, nullptr, FALSE);
+            // 局部重绘：只失效新旧悬停区域，避免整窗位图重分配
+            RECT rc;
+            if (RectForId(old, &rc)) InvalidateRect(h, &rc, FALSE);
+            if (RectForId(id, &rc))  InvalidateRect(h, &rc, FALSE);
         }
         bool hand = (id == H_UPDATE_LINK || id == H_ABOUT_URL ||
                      id >= H_NAV0 || id == H_TITLE_GEAR ||
@@ -560,9 +594,24 @@ static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 }
 
 // ---------------- 入口 ----------------
+static HANDLE g_hSingleInstance = nullptr;
+
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow) {
     // 程序目录含中文 → 自动经 ASCII 盘符映射重启（ClamAV 引擎不支持非 ASCII 路径）
+    // 临时父实例不抢单实例锁、不做映射清理（都由子实例负责，避免父子竞争）
     if (RelaunchViaDosDevice()) return 0;
+
+    // 单实例：抢不到说明已有实例 → 激活它的窗口后退出（也不动任何映射）
+    g_hSingleInstance = CreateMutexW(nullptr, TRUE, L"Local\\KrakenAV_SingleInstance");
+    if (g_hSingleInstance && GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND prev = FindWindowW(L"KrakenMainWnd", nullptr);
+        if (prev) {
+            ShowWindow(prev, SW_RESTORE);
+            SetForegroundWindow(prev);
+        }
+        CloseHandle(g_hSingleInstance);
+        return 0;
+    }
 
     SetProcessDPIAware();
     {
@@ -582,6 +631,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow) {
     g_quarDir = g_exeDir + L"\\quarantine";
     g_reportDir = g_exeDir + L"\\reports";
     g_confDir = g_exeDir + L"\\conf";
+    // 唯一实例就位：清理历史残留映射（上次崩溃遗留），跳过自己正在用的盘符
+    if (g_exeDir.size() >= 2 && g_exeDir[1] == L':')
+        CleanupStaleMappings(g_exeDir, g_exeDir.substr(0, 2));
     LoadSettings();
     g_lang = g_set.lang;
     g_engineDir = g_set.engineDir;
@@ -600,6 +652,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow) {
     wc.lpfnWndProc = MainProc;
     wc.hInstance = hInst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(1));   // exe 资源里的应用图标
     wc.lpszClassName = L"KrakenMainWnd";
     RegisterClassW(&wc);
 
@@ -619,5 +672,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow) {
     DrawShutdown();
     GdiplusShutdown(gdp);
     CoUninitialize();
+    // 释放单实例锁（RemoveOwnDosDevice 已在 WM_DESTROY 清掉自己的映射）
+    if (g_hSingleInstance) {
+        ReleaseMutex(g_hSingleInstance);
+        CloseHandle(g_hSingleInstance);
+    }
     return 0;
 }

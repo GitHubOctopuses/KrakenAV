@@ -16,6 +16,9 @@
 
 #pragma comment(lib, "shlwapi.lib")
 
+// 版本号（唯一来源，中英文字符串表经宏拼接引用）
+#define KRAKENAV_VERSION_W L"1.1.3"
+
 // ---------- 路径 ----------
 extern std::wstring g_exeDir;      // exe 所在目录（含尾反斜杠）
 extern std::wstring g_engineDir;   // ClamAV 引擎目录（DLL + freshclam.exe）
@@ -101,3 +104,11 @@ void SafeShellOpen(HWND hwnd, const std::wstring& path);
 
 // 路径是否含非 ASCII 字符（ClamAV 不支持中文路径的场景判定）
 bool PathHasNonAscii(const std::wstring& s);
+
+// 长路径支持：达到阈值时加 \\?\ 前缀（仅盘符绝对路径），已带前缀原样返回
+std::wstring ToLongPath(const std::wstring& p);
+// 去掉 \\?\ 前缀（用于路径比较/显示）
+std::wstring StripLongPath(const std::wstring& p);
+
+// 就地 XOR 混淆文件内容（隔离区防误执行：改回原名也无法直接运行）
+bool XorFileInPlace(const std::wstring& path);

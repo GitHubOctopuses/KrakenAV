@@ -15,9 +15,9 @@ A lightweight, open-source antivirus for Windows, built on the [ClamAV](https://
 
 - **Three scan modes** — Quick (user profile + startup folders), Full (all local drives), Custom (any folder), with live log and a stoppable scan thread
 - **~3.6 million signatures** from the official ClamAV `main` + `daily` + `bytecode` databases
-- **Infected-file actions**: report only / delete / move to quarantine (with a manifest)
+- **Infected-file actions**: report only / delete / move to quarantine. Delete keeps a backup copy in quarantine; quarantined files are XOR-obfuscated so renaming them back cannot re-execute the payload (restore with `quarantine_restore.exe`)
 - **Flexible scan limits**: max file size, archive unpacked size, file count, nesting depth
-- **Smart exclusions**: ~35 inert file types skipped by default (`.md`, `.jpg`, `.mp4`, …) — scripts and documents (`.js`, `.pdf`, Office) are **never** excluded
+- **Smart exclusions**: ~34 inert file types skipped by default (`.md`, `.jpg`, `.mp4`, …) — scripts and documents (`.js`, `.pdf`, `.svg`, Office) are **never** excluded
 - **In-app database updates** via official `database.clamav.net`, powered by `freshclam.exe` with live progress
 - **Chinese / English UI**, switchable instantly (including dialog titles)
 - **Full-width Chinese path support** — see [How Chinese paths are handled](#how-chinese-paths-are-handled)
@@ -28,7 +28,7 @@ A lightweight, open-source antivirus for Windows, built on the [ClamAV](https://
 Grab the zip from [Releases](../../releases), unzip anywhere (Chinese paths are fine) and double-click `KrakenAV.exe`:
 
 1. Click **Update DB** at the bottom-right on first run (~110 MB download)
-2. Pick a scan mode. Reports land in `reports\`, quarantined files in `quarantine\`
+2. Pick a scan mode. Reports land in `reports\`, quarantined (obfuscated) files in `quarantine\`; inspect `manifest.txt`, restore a file with `quarantine_restore.exe <file.quarantine> [dest]`
 
 > If you have another antivirus (Kaspersky, 360, Huorong…), add the KrakenAV folder to its trust/exclusion list — virus databases contain millions of malicious signatures by design and will get quarantined by other engines. If that already happened, restore with the encrypted backup: `7zr.exe x -pKrakenAV2026 db_backup.7z -aoa -odatabase`.
 
@@ -74,7 +74,7 @@ GPL-2.0 — see [LICENSE](LICENSE). ClamAV is © Cisco Talos, GPLv2.
 
 基于 [ClamAV](https://www.clamav.net) 1.5.4 引擎的轻量开源 Windows 杀毒软件。界面为 Win32 + GDI+ 纯手绘深色主题，无 Qt / .NET / 运行库依赖，主体就是一个静态链接的 EXE。
 
-**功能**：快速 / 全盘 / 定制三种扫描（实时日志、可中途停止）、约 364 万特征（官方 main + daily + bytecode 库）、染毒文件仅报告 / 删除 / 隔离、扫描大小与压缩包限制可调、默认跳过约 35 种惰性文件类型（.md .jpg .mp4 等；脚本与文档永不排除）、病毒库在线更新（实时进度）、中英双语界面即时切换、高 DPI 适配。
+**功能**：快速 / 全盘 / 定制三种扫描（实时日志、可中途停止）、约 364 万特征（官方 main + daily + bytecode 库）、染毒文件仅报告 / 删除 / 隔离（删除前自动留隔离副本；隔离文件经 XOR 混淆，改名无法直接运行，用 `quarantine_restore.exe` 恢复）、扫描大小与压缩包限制可调、默认跳过约 34 种惰性文件类型（.md .jpg .mp4 等；脚本与文档含 .svg 永不排除）、病毒库在线更新（实时进度）、中英双语界面即时切换、高 DPI 适配。
 
 **使用**：从 [Releases](../../releases) 下载 zip，解压到任意路径（支持中文路径）双击 `KrakenAV.exe`，首次使用先点右下角"更新病毒库"（约 110 MB）。
 

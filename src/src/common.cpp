@@ -22,7 +22,7 @@ static const wchar_t* ZH[STR_COUNT] = {
     L"已扫描", L"威胁", L"用时", L"正在加载病毒库引擎",
     L"停止", L"确 定", L"浏览...",
     L"病毒库", L"未安装", L"个特征", L"更新病毒库 ▸",
-    L"版本 1.1.2", L"扫描引擎：ClamAV", L"基于 ClamAV (GPLv2) 开源引擎构建", L"https://github.com/GitHubOctopuses/KrakenAV",
+    L"版本 " KRAKENAV_VERSION_W, L"扫描引擎：ClamAV", L"基于 ClamAV (GPLv2) 开源引擎构建", L"https://github.com/GitHubOctopuses/KrakenAV",
     L"提示", L"病毒库尚未安装，是否现在打开更新界面？", L"病毒库正在更新，请稍候再扫描。", L"选择要扫描的文件夹",
     L"开始快速扫描", L"开始全盘扫描", L"开始定制扫描",
     L"引擎", L"个特征", L"病毒库日期",
@@ -53,7 +53,7 @@ static const wchar_t* EN[STR_COUNT] = {
     L"Scanned", L"Threats", L"Elapsed", L"Loading virus database engine",
     L"Stop", L"OK", L"Browse...",
     L"Virus DB", L"not installed", L"signatures", L"Update DB ▸",
-    L"Version 1.1.2", L"Engine: ClamAV", L"Built on the ClamAV (GPLv2) open-source engine", L"https://github.com/GitHubOctopuses/KrakenAV",
+    L"Version " KRAKENAV_VERSION_W, L"Engine: ClamAV", L"Built on the ClamAV (GPLv2) open-source engine", L"https://github.com/GitHubOctopuses/KrakenAV",
     L"Notice", L"Virus database is not installed. Open the update window now?", L"Virus database is updating, please wait.", L"Select a folder to scan",
     L"Quick scan started", L"Full scan started", L"Custom scan started",
     L"Engine", L"signatures", L"DB date",
@@ -147,11 +147,55 @@ void EnsureDir(const std::wstring& dir) {
     }
 }
 
+// ---------- 长路径（>260）支持 ----------
+static const wchar_t* LONG_PREFIX = L"\\\\?\\";
+
+std::wstring ToLongPath(const std::wstring& p) {
+    if (p.size() < 248) return p;                       // 预留余量
+    if (p.compare(0, 4, LONG_PREFIX) == 0) return p;    // 已带前缀
+    if (p.size() >= 3 && p[1] == L':' && p[2] == L'\\') // 盘符绝对路径
+        return LONG_PREFIX + p;
+    return p;                                           // UNC 等暂不处理
+}
+
+std::wstring StripLongPath(const std::wstring& p) {
+    if (p.compare(0, 4, LONG_PREFIX) == 0) return p.substr(4);
+    return p;
+}
+
+// ---------- 隔离文件 XOR 混淆 ----------
+bool XorFileInPlace(const std::wstring& path) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+                           0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        // 只读属性：清掉重试一次
+        SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_NORMAL);
+        h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+                        0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return false;
+    }
+    char buf[65536];
+    LONG64 off = 0;
+    DWORD rd = 0;
+    while (ReadFile(h, buf, sizeof(buf), &rd, nullptr) && rd > 0) {
+        for (DWORD i = 0; i < rd; i++) buf[i] ^= 0x5A;
+        LARGE_INTEGER li{}; li.QuadPart = off;
+        SetFilePointerEx(h, li, nullptr, FILE_BEGIN);
+        DWORD wr = 0;
+        if (!WriteFile(h, buf, rd, &wr, nullptr) || wr != rd) { CloseHandle(h); return false; }
+        off += rd;
+        LARGE_INTEGER nxt{}; nxt.QuadPart = off;
+        SetFilePointerEx(h, nxt, nullptr, FILE_BEGIN);
+    }
+    CloseHandle(h);
+    return true;
+}
+
 std::wstring DefaultExcludeList() {
     // 默认排除：纯文本、图片、音视频等无法在 Windows 上直接执行的惰性格式
-    // 注意：.js/.vbs/.bat/.pdf/office 文档等可携带恶意代码的格式不在排除之列
+    // 注意：.js/.vbs/.bat/.pdf/.svg/office 文档等可携带恶意代码的格式不在排除之列
     return L".md;.txt;.log;.json;.xml;.yaml;.yml;.toml;.ini;.cfg;.conf;.csv;.tsv;"
-           L".jpg;.jpeg;.png;.gif;.bmp;.ico;.webp;.svg;.tif;.tiff;"
+           L".jpg;.jpeg;.png;.gif;.bmp;.ico;.webp;.tif;.tiff;"
            L".mp3;.wav;.flac;.aac;.ogg;.m4a;.wma;"
            L".mp4;.mkv;.avi;.mov;.wmv;.flv;.webm;.m4v;.ts;.m2ts";
 }

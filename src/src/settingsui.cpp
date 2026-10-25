@@ -259,6 +259,11 @@ void ShowSettingsWindow(HWND parent) {
     MSG msg;
     BOOL r;
     while (g_setWnd != nullptr && (r = GetMessageW(&msg, nullptr, 0, 0)) > 0) {
+        // ESC 取消设置（键盘消息可能落在 EDIT 子控件上，线程级拦截）
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) {
+            PostMessageW(g_setWnd, WM_CLOSE, 0, 0);
+            continue;
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }

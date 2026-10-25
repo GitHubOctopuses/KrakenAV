@@ -5,7 +5,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 
 PROD = r'D:\Zcode\杀毒软件\KrakenAV'
 STAGE = r'D:\Zcode\杀毒软件\KrakenAV_release_stage'
-OUT = os.path.join(PROD, 'KrakenAV-v1.1.1-win64.zip')
+OUT = os.path.join(PROD, 'KrakenAV-v1.1.3-win64.zip')
 
 if os.path.isdir(STAGE):
     shutil.rmtree(STAGE, ignore_errors=True)
@@ -23,6 +23,7 @@ shutil.copy2(os.path.join(PROD, 'COPYING.txt'), STAGE)
 shutil.copy2(os.path.join(PROD, 'README.md'), STAGE)
 shutil.copy2(os.path.join(PROD, '7zr.exe'), STAGE)
 shutil.copy2(os.path.join(PROD, 'test_console.exe'), STAGE)
+shutil.copy2(os.path.join(PROD, 'quarantine_restore.exe'), STAGE)
 for d in ['database', 'quarantine', 'reports', 'conf']:
     os.makedirs(os.path.join(STAGE, d), exist_ok=True)
 # db_backup.7z 一并放入（首次离线恢复用）

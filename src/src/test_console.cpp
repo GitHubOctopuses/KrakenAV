@@ -111,6 +111,20 @@ int wmain(int argc, wchar_t** argv) {
     std::wstring act2 = ApplyThreat(eicarPath, "Eicar-Test");
     check(L"delete action removes file", GetFileAttributesW(eicarPath.c_str()) == INVALID_FILE_ATTRIBUTES);
 
+    // i18n completeness: both language tables must be non-empty for every id
+    // (guards against silent misalignment when a string is inserted mid-table)
+    {
+        int ok = 0;
+        for (int id = 0; id < STR_COUNT; id++) {
+            g_lang = LANG_ZH; const wchar_t* a = STR((StrId)id);
+            g_lang = LANG_EN;  const wchar_t* b = STR((StrId)id);
+            if (a && *a && b && *b) ok++;
+        }
+        g_lang = LANG_ZH;
+        std::wcout << L"  i18n: " << ok << L"/" << STR_COUNT << L"\n";
+        check(L"i18n table complete", ok == STR_COUNT);
+    }
+
     std::wcout << L"\n==== " << pass << L" passed, " << fail << L" failed ====\n";
 
     // Bonus: Chinese path + Chinese filename EICAR (handle-based scan)
